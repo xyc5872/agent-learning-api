@@ -1,6 +1,6 @@
 # Agent Learning API
 
-一个使用 FastAPI 构建的学习型 API 服务。目前支持健康检查，以及使用内存存储创建和查询学习任务。
+一个使用 FastAPI 构建的学习型 API 服务。目前支持健康检查，以及使用内存存储创建、查询、修改和删除学习任务。
 
 ## 环境要求
 
@@ -33,6 +33,8 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 | `POST` | `/tasks` | 创建任务，成功时返回 201 |
 | `GET` | `/tasks` | 查询任务列表 |
 | `GET` | `/tasks/{task_id}` | 根据 ID 查询单个任务，不存在时返回 404 |
+| `PATCH` | `/tasks/{task_id}` | 部分更新任务，不存在时返回 404 |
+| `DELETE` | `/tasks/{task_id}` | 删除任务，成功时返回 204，不存在时返回 404 |
 
 ### 创建任务
 
@@ -60,7 +62,8 @@ curl -X POST http://127.0.0.1:8000/tasks \
   "status": "todo",
   "priority": 1,
   "estimated_minutes": 60,
-  "created_at": "2026-09-13T08:00:00Z"
+  "created_at": "2026-09-13T08:00:00Z",
+  "updated_at": "2026-09-13T08:00:00Z"
 }
 ```
 
@@ -85,6 +88,26 @@ curl http://127.0.0.1:8000/tasks
 ```bash
 curl http://127.0.0.1:8000/tasks/1
 ```
+
+### 修改和删除任务
+
+只提交需要修改的字段：
+
+```bash
+curl -X PATCH http://127.0.0.1:8000/tasks/1 \
+  -H "Content-Type: application/json" \
+  -d '{"status": "doing"}'
+```
+
+修改时会刷新 `updated_at`。已完成（`done`）的任务不能直接改回 `todo`，此时返回 409。
+
+删除任务：
+
+```bash
+curl -X DELETE http://127.0.0.1:8000/tasks/1
+```
+
+删除成功返回 204，响应体为空。
 
 ## 内存存储说明
 

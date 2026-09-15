@@ -46,6 +46,8 @@ def test_create_task_returns_201() -> None:
     assert body["priority"] == 1
     assert body["estimated_minutes"] == 45
     assert datetime.fromisoformat(body["created_at"]).tzinfo is not None
+    assert datetime.fromisoformat(body["updated_at"]).tzinfo is not None
+    assert body["updated_at"] == body["created_at"]
 
 
 def test_list_tasks_returns_created_tasks() -> None:
@@ -72,6 +74,120 @@ def test_get_missing_task_returns_404() -> None:
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Task not found"}
+
+
+def test_patch_task_partially_updates_task() -> None:
+    created = client.post("/tasks", json=valid_task_data()).json()
+
+    response = client.patch(f"/tasks/{created['id']}", json={"title": "Learn PATCH"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["title"] == "Learn PATCH"
+    assert body["description"] == created["description"]
+    assert body["status"] == created["status"]
+    assert body["priority"] == created["priority"]
+    assert body["estimated_minutes"] == created["estimated_minutes"]
+    assert body["created_at"] == created["created_at"]
+    assert datetime.fromisoformat(body["updated_at"]) > datetime.fromisoformat(
+        created["updated_at"]
+    )
+
+
+def test_patch_missing_task_returns_404() -> None:
+    response = client.patch("/tasks/999", json={"title": "Missing"})
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Task not found"}
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("title", ""),
+        ("title", "   "),
+        ("title", None),
+        ("status", "blocked"),
+        ("priority", 4),
+        ("estimated_minutes", 0),
+    ],
+)
+def test_invalid_patch_data_returns_422(field: str, invalid_value: object) -> None:
+    created = client.post("/tasks", json=valid_task_data()).json()
+
+    response = client.patch(f"/tasks/{created['id']}", json={field: invalid_value})
+
+    assert response.status_code == 422
+
+
+def test_done_task_cannot_be_changed_directly_back_to_todo() -> None:
+    task_data = valid_task_data()
+    task_data["status"] = "done"
+    created = client.post("/tasks", json=task_data).json()
+
+    response = client.patch(f"/tasks/{created['id']}", json={"status": "todo"})
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "A done task cannot be changed directly back to todo"
+    }
+    assert client.get(f"/tasks/{created['id']}").json()["status"] == "done"
+
+
+def test_done_task_can_be_changed_to_doing() -> None:
+    task_data = valid_task_data()
+    task_data["status"] = "done"
+    created = client.post("/tasks", json=task_data).json()
+
+    response = client.patch(
+        f"/tasks/{created['id']}",
+        json={"status": "doing"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "doing"
+
+def test_delete_task_returns_204_and_removes_task() -> None:
+    created = client.post("/tasks", json=valid_task_data()).json()
+
+    response = client.delete(f"/tasks/{created['id']}")
+
+    assert response.status_code == 204
+    assert response.content == b""
+    assert client.get(f"/tasks/{created['id']}").status_code == 404
+
+
+def test_delete_missing_task_returns_404() -> None:
+    response = client.delete("/tasks/999")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Task not found"}
+
+
+def test_complete_task_crud_flow() -> None:
+    created = client.post("/tasks", json=valid_task_data())
+    task_id = created.json()["id"]
+
+    assert client.get(f"/tasks/{task_id}").json() == created.json()
+    updated = client.patch(
+        f"/tasks/{task_id}",
+        json={"description": "CRUD verified", "status": "doing"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["description"] == "CRUD verified"
+    assert updated.json()["status"] == "doing"
+    assert client.delete(f"/tasks/{task_id}").status_code == 204
+    assert client.get("/tasks").json() == []
+
+
+def test_creating_after_delete_does_not_duplicate_an_existing_id() -> None:
+    first = client.post("/tasks", json=valid_task_data()).json()
+    second = client.post("/tasks", json=valid_task_data()).json()
+    client.delete(f"/tasks/{first['id']}")
+
+    third = client.post("/tasks", json=valid_task_data()).json()
+
+    assert third["id"] > second["id"]
 
 
 @pytest.mark.parametrize(
