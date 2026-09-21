@@ -1,17 +1,52 @@
+import os
 from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
-from app.main import app, tasks
+os.environ["DATABASE_URL"] = "sqlite+pysqlite://"
+
+import app.database as database  # noqa: E402
+from app.database import Base  # noqa: E402
+from app.main import app  # noqa: E402
 
 
 client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
-def clear_tasks() -> None:
-    tasks.clear()
+def isolated_database(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'tasks.db'}")
+    Base.metadata.create_all(bind=engine)
+    session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+    monkeypatch.setattr(database, "SessionLocal", session_factory)
+    yield
+    engine.dispose()
+
+
+def test_session_is_rolled_back_and_closed_on_failure(monkeypatch) -> None:
+    class TrackingSession:
+        rolled_back = False
+        closed = False
+
+        def rollback(self) -> None:
+            self.rolled_back = True
+
+        def close(self) -> None:
+            self.closed = True
+
+    session = TrackingSession()
+    monkeypatch.setattr(database, "SessionLocal", lambda: session)
+    dependency = database.get_db()
+    assert next(dependency) is session
+
+    with pytest.raises(RuntimeError, match="database write failed"):
+        dependency.throw(RuntimeError("database write failed"))
+
+    assert session.rolled_back
+    assert session.closed
 
 
 def valid_task_data() -> dict[str, object]:

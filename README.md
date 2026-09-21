@@ -1,11 +1,12 @@
 # Agent Learning API
 
-一个使用 FastAPI 构建的学习型 API 服务。目前支持健康检查，以及使用内存存储创建、查询、修改和删除学习任务。
+一个使用 FastAPI 构建的学习型 API 服务。目前支持健康检查，以及使用 MySQL 持久化创建、查询、修改和删除学习任务。
 
 ## 环境要求
 
 - Python 3.12
 - [uv](https://docs.astral.sh/uv/)
+- Docker Compose（运行 MySQL）
 
 ## 安装依赖
 
@@ -13,10 +14,22 @@
 uv sync
 ```
 
+## 配置和启动 MySQL
+
+复制示例环境变量，并为 `MYSQL_PASSWORD`、`MYSQL_ROOT_PASSWORD` 设置不同的密码；将 `DATABASE_URL` 中的用户名、密码、端口和库名与 MySQL 配置保持一致。密码若含 `@`、`:`、`/` 等字符，需在 URL 中进行百分号编码。`.env` 已加入 `.gitignore`，不要提交密码。
+
+```bash
+cp .env.example .env
+docker compose up -d mysql
+docker compose ps
+```
+
+已有 `.env` 和 MySQL 卷时，只需补充 `DATABASE_URL`，无需重建或清空卷。`DATABASE_URL` 必须是 `mysql+pymysql://...` 格式。应用启动时使用 SQLAlchemy 的 `create_all` 创建尚不存在的 `tasks` 表，不修改或删除其他表；表结构迁移留待下一里程碑。
+
 ## 启动服务
 
 ```bash
-uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+uv run uvicorn app.main:app --env-file .env --host 127.0.0.1 --port 8000 --reload
 ```
 
 服务启动后可访问：
@@ -109,15 +122,23 @@ curl -X DELETE http://127.0.0.1:8000/tasks/1
 
 删除成功返回 204，响应体为空。
 
-## 内存存储说明
+## 数据库存储说明
 
-当前任务保存在 Python 列表中，没有接入数据库。任务数据只存在于运行服务的进程内，服务停止或重启后会全部消失。
+任务保存在 MySQL `tasks` 表中，服务重启后仍可查询。`app/models.py` 定义数据库 Model；`app/main.py` 中的 Pydantic Schema 负责请求校验和响应格式。每个请求获取独立的 SQLAlchemy Session，请求结束后关闭；创建、修改和删除会提交事务，发生异常时回滚。`/health` 不检查数据库连接。
+
+可直接在数据库中核对记录：
+
+```bash
+docker compose exec mysql sh -c 'mysql --user="$MYSQL_USER" --password="$MYSQL_PASSWORD" --database="$MYSQL_DATABASE" --execute="SELECT id, title, status FROM tasks ORDER BY id DESC LIMIT 5;"'
+```
 
 ## 运行测试
 
 ```bash
 uv run pytest -q
 ```
+
+测试为每个用例创建独立的临时 SQLite 数据库，并替换 Session 工厂，不会删除 MySQL 数据。原先依赖内存列表 `tasks.clear()` 的用例已改为这种数据库隔离方式；运行中的 MySQL 持久性还需用实际服务重启验证。
 
 ## 现有辅助接口
 

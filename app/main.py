@@ -1,11 +1,23 @@
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, status
-from pydantic import BaseModel, Field, field_validator
+from fastapi import Depends, FastAPI, HTTPException, status
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.database import Base, engine, get_db
+from app.models import Task
 
 
-app = FastAPI(title="Agent Learning API hhy")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    Base.metadata.create_all(bind=engine)
+    yield
+
+
+app = FastAPI(title="Agent Learning API hhy", lifespan=lifespan)
 
 
 TaskStatus = Literal["todo", "doing", "done"]
@@ -61,6 +73,8 @@ class TaskUpdate(BaseModel):
 
 
 class TaskResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     title: str
     description: str
@@ -70,15 +84,18 @@ class TaskResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    @field_validator("created_at", "updated_at", mode="before")
+    @classmethod
+    def mysql_datetime_is_utc(cls, value: datetime) -> datetime:
+        # MySQL DATETIME does not retain timezone information.
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value
 
-tasks: list[TaskResponse] = []
 
-
-def find_task_index(task_id: int) -> int:
-    for index, task in enumerate(tasks):
-        if task.id == task_id:
-            return index
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+def find_task(db: Session, task_id: int) -> Task:
+    task = db.get(Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    return task
 
 
 @app.get("/health")
@@ -90,32 +107,34 @@ async def health() -> dict[str, str]:
 
 
 @app.post("/tasks", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
-async def create_task(task: TaskCreate) -> TaskResponse:
+def create_task(task: TaskCreate, db: Session = Depends(get_db)) -> Task:
     now = datetime.now(UTC)
-    created_task = TaskResponse(
-        id=max((existing_task.id for existing_task in tasks), default=0) + 1,
+    created_task = Task(
         created_at=now,
         updated_at=now,
         **task.model_dump(),
     )
-    tasks.append(created_task)
+    db.add(created_task)
+    db.commit()
+    db.refresh(created_task)
     return created_task
 
 
 @app.get("/tasks", response_model=list[TaskResponse])
-async def list_tasks() -> list[TaskResponse]:
-    return tasks
+def list_tasks(db: Session = Depends(get_db)) -> list[Task]:
+    return list(db.scalars(select(Task).order_by(Task.id)))
 
 
 @app.get("/tasks/{task_id}", response_model=TaskResponse)
-async def get_task(task_id: int) -> TaskResponse:
-    return tasks[find_task_index(task_id)]
+def get_task(task_id: int, db: Session = Depends(get_db)) -> Task:
+    return find_task(db, task_id)
 
 
 @app.patch("/tasks/{task_id}", response_model=TaskResponse)
-async def update_task(task_id: int, task_update: TaskUpdate) -> TaskResponse:
-    task_index = find_task_index(task_id)
-    current_task = tasks[task_index]
+def update_task(
+    task_id: int, task_update: TaskUpdate, db: Session = Depends(get_db)
+) -> Task:
+    current_task = find_task(db, task_id)
     update_data = task_update.model_dump(exclude_unset=True)
 
     if current_task.status == "done" and update_data.get("status") == "todo":
@@ -124,21 +143,25 @@ async def update_task(task_id: int, task_update: TaskUpdate) -> TaskResponse:
             detail="A done task cannot be changed directly back to todo",
         )
 
-    task_data = current_task.model_dump()
-    task_data.update(update_data)
+    for field, value in update_data.items():
+        setattr(current_task, field, value)
     now = datetime.now(UTC)
-    task_data["updated_at"] = max(
+    previous_updated_at = current_task.updated_at
+    if previous_updated_at.tzinfo is None:
+        previous_updated_at = previous_updated_at.replace(tzinfo=UTC)
+    current_task.updated_at = max(
         now,
-        current_task.updated_at + timedelta(microseconds=1),
+        previous_updated_at + timedelta(microseconds=1),
     )
-    updated_task = TaskResponse.model_validate(task_data)
-    tasks[task_index] = updated_task
-    return updated_task
+    db.commit()
+    db.refresh(current_task)
+    return current_task
 
 
 @app.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_task(task_id: int) -> None:
-    tasks.pop(find_task_index(task_id))
+def delete_task(task_id: int, db: Session = Depends(get_db)) -> None:
+    db.delete(find_task(db, task_id))
+    db.commit()
 
 
 @app.get("/test")
