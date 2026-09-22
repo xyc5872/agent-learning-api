@@ -3,7 +3,7 @@ from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 os.environ["DATABASE_URL"] = "sqlite+pysqlite://"
@@ -22,7 +22,7 @@ def isolated_database(tmp_path, monkeypatch):
     Base.metadata.create_all(bind=engine)
     session_factory = sessionmaker(bind=engine, expire_on_commit=False)
     monkeypatch.setattr(database, "SessionLocal", session_factory)
-    yield
+    yield engine
     engine.dispose()
 
 
@@ -59,6 +59,34 @@ def valid_task_data() -> dict[str, object]:
     }
 
 
+def create_task(
+    title: str,
+    description: str,
+    task_status: str,
+    priority: int,
+) -> dict[str, object]:
+    task_data = valid_task_data()
+    task_data.update(
+        title=title,
+        description=description,
+        status=task_status,
+        priority=priority,
+    )
+    response = client.post("/tasks", json=task_data)
+    assert response.status_code == 201
+    return response.json()
+
+
+def create_filter_test_tasks() -> list[dict[str, object]]:
+    return [
+        create_task("Learn FastAPI", "Build API endpoints", "todo", 1),
+        create_task("Write docs", "FastAPI query guide", "doing", 2),
+        create_task("Tune database", "Review slow queries", "done", 3),
+        create_task("Clean desk", "Organize the workspace", "todo", 2),
+        create_task("Release API", "Publish backend changes", "doing", 3),
+    ]
+
+
 def test_health_endpoint_is_unchanged() -> None:
     response = client.get("/health")
 
@@ -91,8 +119,134 @@ def test_list_tasks_returns_created_tasks() -> None:
     response = client.get("/tasks")
 
     assert response.status_code == 200
-    assert len(response.json()) == 1
-    assert response.json()[0]["title"] == "Learn FastAPI"
+    assert response.json()["total"] == 1
+    assert response.json()["page"] == 1
+    assert response.json()["page_size"] == 20
+    assert len(response.json()["items"]) == 1
+    assert response.json()["items"][0]["title"] == "Learn FastAPI"
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_titles"),
+    [
+        ("status=todo", ["Learn FastAPI", "Clean desk"]),
+        ("priority=2", ["Write docs", "Clean desk"]),
+        (
+            "min_priority=2",
+            ["Write docs", "Tune database", "Clean desk", "Release API"],
+        ),
+        ("search=fastapi", ["Learn FastAPI", "Write docs"]),
+    ],
+)
+def test_list_tasks_supports_individual_filters(
+    query: str, expected_titles: list[str]
+) -> None:
+    create_filter_test_tasks()
+
+    response = client.get(f"/tasks?{query}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == len(expected_titles)
+    assert [item["title"] for item in body["items"]] == expected_titles
+
+
+def test_list_tasks_combines_filters() -> None:
+    create_filter_test_tasks()
+
+    response = client.get(
+        "/tasks?status=doing&min_priority=2&search=api&sort_by=priority&sort_order=desc"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 2
+    assert [item["title"] for item in body["items"]] == [
+        "Release API",
+        "Write docs",
+    ]
+
+
+def test_search_treats_sql_wildcards_as_literal_characters() -> None:
+    create_task("Reach 100% coverage", "Testing target", "todo", 1)
+    create_task("Reach 1000 coverage", "Different target", "todo", 1)
+
+    response = client.get("/tasks", params={"search": "100%"})
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert response.json()["items"][0]["title"] == "Reach 100% coverage"
+
+
+def test_search_input_is_not_interpreted_as_sql() -> None:
+    create_filter_test_tasks()
+
+    response = client.get("/tasks", params={"search": "' OR 1=1 --"})
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 0
+    assert response.json()["items"] == []
+
+
+def test_list_tasks_paginates_and_sorts() -> None:
+    tasks = create_filter_test_tasks()
+
+    response = client.get(
+        "/tasks?page=2&page_size=2&sort_by=priority&sort_order=desc"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 5
+    assert body["page"] == 2
+    assert body["page_size"] == 2
+    assert [item["id"] for item in body["items"]] == [tasks[3]["id"], tasks[1]["id"]]
+
+
+def test_list_tasks_uses_count_limit_and_offset_in_database(
+    isolated_database,
+) -> None:
+    create_filter_test_tasks()
+    select_statements: list[str] = []
+
+    def record_selects(
+        _connection, _cursor, statement, _parameters, _context, _executemany
+    ) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            select_statements.append(statement.lower())
+
+    event.listen(isolated_database, "before_cursor_execute", record_selects)
+    try:
+        response = client.get("/tasks?status=doing&page=2&page_size=1")
+    finally:
+        event.remove(isolated_database, "before_cursor_execute", record_selects)
+
+    assert response.status_code == 200
+    assert len(select_statements) == 2
+    assert "count(" in select_statements[0]
+    assert "where tasks.status = ?" in select_statements[0]
+    assert "limit ? offset ?" in select_statements[1]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "page=0",
+        "page_size=0",
+        "page_size=101",
+        "status=blocked",
+        "priority=0",
+        "priority=4",
+        "min_priority=0",
+        "min_priority=4",
+        "sort_by=description",
+        "sort_order=sideways",
+    ],
+)
+def test_list_tasks_rejects_invalid_query_parameters(query: str) -> None:
+    response = client.get(f"/tasks?{query}")
+
+    assert response.status_code == 422
 
 
 def test_get_task_returns_matching_task() -> None:
@@ -212,7 +366,7 @@ def test_complete_task_crud_flow() -> None:
     assert updated.json()["description"] == "CRUD verified"
     assert updated.json()["status"] == "doing"
     assert client.delete(f"/tasks/{task_id}").status_code == 204
-    assert client.get("/tasks").json() == []
+    assert client.get("/tasks").json()["items"] == []
 
 
 def test_creating_after_delete_does_not_duplicate_an_existing_id() -> None:

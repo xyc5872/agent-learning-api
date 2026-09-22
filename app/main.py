@@ -1,9 +1,9 @@
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -14,6 +14,10 @@ app = FastAPI(title="Agent Learning API hhy")
 
 TaskStatus = Literal["todo", "doing", "done"]
 TaskPriority = Literal[1, 2, 3]
+TaskSortField = Literal[
+    "id", "title", "status", "priority", "created_at", "updated_at"
+]
+SortOrder = Literal["asc", "desc"]
 
 
 class TaskCreate(BaseModel):
@@ -83,6 +87,13 @@ class TaskResponse(BaseModel):
         return value.replace(tzinfo=UTC) if value.tzinfo is None else value
 
 
+class TaskListResponse(BaseModel):
+    items: list[TaskResponse]
+    total: int
+    page: int
+    page_size: int
+
+
 def find_task(db: Session, task_id: int) -> Task:
     task = db.get(Task, task_id)
     if task is None:
@@ -112,9 +123,68 @@ def create_task(task: TaskCreate, db: Session = Depends(get_db)) -> Task:
     return created_task
 
 
-@app.get("/tasks", response_model=list[TaskResponse])
-def list_tasks(db: Session = Depends(get_db)) -> list[Task]:
-    return list(db.scalars(select(Task).order_by(Task.id)))
+@app.get("/tasks", response_model=TaskListResponse)
+def list_tasks(
+    status_filter: TaskStatus | None = Query(default=None, alias="status"),
+    priority: int | None = Query(default=None, ge=1, le=3),
+    min_priority: int | None = Query(default=None, ge=1, le=3),
+    search: str | None = Query(default=None, min_length=1, max_length=200),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    sort_by: TaskSortField = "id",
+    sort_order: SortOrder = "asc",
+    db: Session = Depends(get_db),
+) -> TaskListResponse:
+    filters = []
+    if status_filter is not None:
+        filters.append(Task.status == status_filter)
+    if priority is not None:
+        filters.append(Task.priority == priority)
+    if min_priority is not None:
+        filters.append(Task.priority >= min_priority)
+    if search is not None:
+        escaped_search = (
+            search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        search_pattern = f"%{escaped_search}%"
+        filters.append(
+            or_(
+                Task.title.ilike(search_pattern, escape="\\"),
+                Task.description.ilike(search_pattern, escape="\\"),
+            )
+        )
+
+    total = db.scalar(select(func.count()).select_from(Task).where(*filters)) or 0
+
+    sort_columns = {
+        "id": Task.id,
+        "title": Task.title,
+        "status": Task.status,
+        "priority": Task.priority,
+        "created_at": Task.created_at,
+        "updated_at": Task.updated_at,
+    }
+    sort_column = sort_columns[sort_by]
+    direction = sort_column.asc if sort_order == "asc" else sort_column.desc
+    order_by = [direction()]
+    if sort_by != "id":
+        id_direction = Task.id.asc if sort_order == "asc" else Task.id.desc
+        order_by.append(id_direction())
+
+    statement = (
+        select(Task)
+        .where(*filters)
+        .order_by(*order_by)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    items = list(db.scalars(statement))
+    return TaskListResponse(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @app.get("/tasks/{task_id}", response_model=TaskResponse)

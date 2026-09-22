@@ -88,7 +88,7 @@ uv run uvicorn app.main:app --env-file .env --host 127.0.0.1 --port 8000 --reloa
 | --- | --- | --- |
 | `GET` | `/health` | 检查服务是否正常运行 |
 | `POST` | `/tasks` | 创建任务，成功时返回 201 |
-| `GET` | `/tasks` | 查询任务列表 |
+| `GET` | `/tasks` | 筛选、搜索、排序并分页查询任务列表 |
 | `GET` | `/tasks/{task_id}` | 根据 ID 查询单个任务，不存在时返回 404 |
 | `PATCH` | `/tasks/{task_id}` | 部分更新任务，不存在时返回 404 |
 | `DELETE` | `/tasks/{task_id}` | 删除任务，成功时返回 204，不存在时返回 404 |
@@ -134,10 +134,36 @@ curl -X POST http://127.0.0.1:8000/tasks \
 
 ### 查询任务
 
-查询全部任务：
+任务列表支持以下查询参数：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `status` | 无 | 精确匹配 `todo`、`doing` 或 `done` |
+| `priority` | 无 | 精确匹配优先级 `1`～`3` |
+| `min_priority` | 无 | 查询优先级数值大于等于该值的任务 |
+| `search` | 无 | 在标题或描述中进行不区分大小写的关键词搜索 |
+| `page` | `1` | 页码，必须大于等于 1 |
+| `page_size` | `20` | 每页数量，范围为 1～100 |
+| `sort_by` | `id` | `id`、`title`、`status`、`priority`、`created_at` 或 `updated_at` |
+| `sort_order` | `asc` | `asc` 或 `desc` |
+
+多个筛选条件可以组合使用。筛选、总数统计、排序和分页均由数据库执行；排序字段使用服务端白名单，查询值由 SQLAlchemy 绑定为 SQL 参数。
+
+组合查询示例：
 
 ```bash
-curl http://127.0.0.1:8000/tasks
+curl 'http://127.0.0.1:8000/tasks?status=doing&min_priority=2&search=api&page=1&page_size=10&sort_by=priority&sort_order=desc'
+```
+
+响应包含任务及分页元数据：
+
+```json
+{
+  "items": [],
+  "total": 0,
+  "page": 1,
+  "page_size": 10
+}
 ```
 
 查询 ID 为 1 的任务：
