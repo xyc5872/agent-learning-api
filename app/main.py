@@ -1,4 +1,3 @@
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -7,17 +6,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.database import Base, engine, get_db
+from app.database import get_db
 from app.models import Task
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    yield
-
-
-app = FastAPI(title="Agent Learning API hhy", lifespan=lifespan)
+app = FastAPI(title="Agent Learning API hhy")
 
 
 TaskStatus = Literal["todo", "doing", "done"]

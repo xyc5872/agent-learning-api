@@ -22,3 +22,6 @@ class Task(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True).with_variant(DATETIME(fsp=6), "mysql"), nullable=False
     )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True).with_variant(DATETIME(fsp=6), "mysql"), nullable=True
+    )

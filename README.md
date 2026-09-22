@@ -24,7 +24,51 @@ docker compose up -d mysql
 docker compose ps
 ```
 
-已有 `.env` 和 MySQL 卷时，只需补充 `DATABASE_URL`，无需重建或清空卷。`DATABASE_URL` 必须是 `mysql+pymysql://...` 格式。应用启动时使用 SQLAlchemy 的 `create_all` 创建尚不存在的 `tasks` 表，不修改或删除其他表；表结构迁移留待下一里程碑。
+已有 `.env` 和 MySQL 卷时，只需补充 `DATABASE_URL`，无需重建或清空卷。`DATABASE_URL` 必须是 `mysql+pymysql://...` 格式。数据库结构由 Alembic 管理，应用启动时不会自动建表；首次启动应用前先执行迁移。
+
+## 数据库迁移
+
+所有 Alembic 命令都通过 `.env` 读取与应用相同的 `DATABASE_URL`。全新数据库升级到最新结构：
+
+```bash
+uv run --env-file .env alembic upgrade head
+```
+
+查看当前 revision 和迁移历史：
+```bash
+uv run --env-file .env alembic heads
+```
+current 查看数据库当前所在的 revision，heads 查看迁移代码中的最新 revision。
+
+
+```bash
+uv run --env-file .env alembic current
+uv run --env-file .env alembic history --verbose
+```
+
+修改 SQLAlchemy Model 后，自动生成迁移并检查是否还有未生成的差异：
+
+```bash
+uv run --env-file .env alembic revision --autogenerate -m "describe schema change"
+# 执行前必须人工阅读 alembic/versions/ 下新生成的迁移文件
+uv run --env-file .env alembic check
+```
+
+执行升级，或回退一个 revision：
+
+```bash
+uv run --env-file .env alembic upgrade head
+uv run --env-file .env alembic downgrade -1
+```
+
+如果数据库已由旧版本应用的 `Base.metadata.create_all()` 建好，且结构经核对与初始迁移完全一致，可只对该现有数据库标记基线，再执行后续迁移：
+
+```bash
+uv run --env-file .env alembic stamp 8771c71d067b
+uv run --env-file .env alembic upgrade head
+```
+
+`stamp` 只写入 revision，不执行建表；不能用于空数据库，也不能代替结构核对。生产环境执行 `downgrade` 前应先备份数据，因为回退字段或表会丢弃其中的数据。
 
 ## 启动服务
 
